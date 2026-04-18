@@ -1,0 +1,50 @@
+# Tiny Tapeout project information
+project:
+  title:        "LFSR-Based Stochastic Neuron"
+  author:       "Prof. Santhosh Sivasubramani, IIT Delhi"
+  discord:      ""
+  description:  "Standalone stochastic neuron with configurable 16-bit LFSR, programmable sigmoid LUT, and SPI interface for neuromorphic computing"
+  language:     "Verilog"
+  clock_hz:     50000000
+
+  tiles: "1x1"
+
+  top_module:  "tt_um_santhosh_stoch_neuron"
+
+  source_files:
+    - "project.v"
+    - "spi_slave.v"
+
+pinout:
+  # Inputs
+  ui[0]: "ext_spike_in"
+  ui[1]: "mode_sel"
+  ui[2]: "neuron_enable"
+  ui[3]: ""
+  ui[4]: "weight_in[0]"
+  ui[5]: "weight_in[1]"
+  ui[6]: "weight_in[2]"
+  ui[7]: "weight_in[3]"
+
+  # Outputs
+  uo[0]: "spike_out"
+  uo[1]: "lfsr_msb"
+  uo[2]: "accum_overflow"
+  uo[3]: "threshold_flag"
+  uo[4]: "membrane[12]"
+  uo[5]: "membrane[13]"
+  uo[6]: "membrane[14]"
+  uo[7]: "membrane[15]"
+
+  # Bidirectional pins
+  uio[0]: "spi_cs_n"
+  uio[1]: "spi_mosi"
+  uio[2]: "spi_miso"
+  uio[3]: "spi_sck"
+  uio[4]: "debug_neuron_en"
+  uio[5]: "debug_stoch_fire"
+  uio[6]: "debug_lfsr5"
+  uio[7]: "debug_lfsr10"
+
+# Do not change!
+yaml_version: 6
