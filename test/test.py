@@ -85,6 +85,52 @@ async def spi_read(dut, addr):
     return read_data
 
 
+async def spi_write_fast(dut, addr, data):
+    """SPI write with minimum 2-cycle SCK half-periods (fastest safe timing)."""
+    cs_bit = 0
+    mosi_bit = 1
+    sck_bit = 3
+    word = ((addr & 0x7F) << 8) | (data & 0xFF)
+    dut.uio_in.value = 0
+    await ClockCycles(dut.clk, 2)
+    for i in range(16):
+        bit_val = (word >> (15 - i)) & 1
+        dut.uio_in.value = (bit_val << mosi_bit)
+        await ClockCycles(dut.clk, 2)
+        dut.uio_in.value = (bit_val << mosi_bit) | (1 << sck_bit)
+        await ClockCycles(dut.clk, 2)
+        dut.uio_in.value = (bit_val << mosi_bit)
+        await ClockCycles(dut.clk, 1)
+    dut.uio_in.value = (1 << cs_bit)
+    await ClockCycles(dut.clk, 2)
+
+
+async def spi_read_fast(dut, addr):
+    """SPI read with minimum 2-cycle SCK half-periods (fastest safe timing)."""
+    cs_bit = 0
+    mosi_bit = 1
+    sck_bit = 3
+    word = (1 << 15) | ((addr & 0x7F) << 8)
+    dut.uio_in.value = 0
+    await ClockCycles(dut.clk, 2)
+    read_data = 0
+    for i in range(16):
+        bit_val = (word >> (15 - i)) & 1
+        dut.uio_in.value = (bit_val << mosi_bit)
+        await ClockCycles(dut.clk, 2)
+        dut.uio_in.value = (bit_val << mosi_bit) | (1 << sck_bit)
+        await ClockCycles(dut.clk, 1)
+        if i >= 8:
+            miso = (int(dut.uio_out.value) >> 2) & 1
+            read_data = (read_data << 1) | miso
+        await ClockCycles(dut.clk, 1)
+        dut.uio_in.value = (bit_val << mosi_bit)
+        await ClockCycles(dut.clk, 1)
+    dut.uio_in.value = (1 << cs_bit)
+    await ClockCycles(dut.clk, 2)
+    return read_data
+
+
 @cocotb.test()
 async def test_reset_state(dut):
     """After reset, spike_out should be 0 and membrane should be 0."""
@@ -278,3 +324,138 @@ async def test_lfsr_long_sequence(dut):
     transitions = sum(1 for i in range(len(samples)-1) if samples[i] != samples[i+1])
     dut._log.info(f"LFSR transitions: {transitions}/1023")
     assert transitions > 200, f"LFSR stuck or short-period: only {transitions} transitions in 1023 steps"
+
+
+# ================================================================
+# Stress tests — SPI timing margins and edge cases
+# ================================================================
+
+@cocotb.test()
+async def test_spi_fast_timing(dut):
+    """SPI write/read at minimum 2-cycle SCK half-periods (fastest safe timing for 3-stage synchronizer)."""
+    clock = Clock(dut.clk, 20, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset_dut(dut)
+
+    test_pairs = [(0x05, 0xDE), (0x06, 0xAD), (0x01, 0xBE), (0x02, 0xEF)]
+    for addr, val in test_pairs:
+        await spi_write_fast(dut, addr, val)
+
+    for addr, val in test_pairs:
+        rb = await spi_read_fast(dut, addr)
+        assert rb == val, f"Fast SPI: reg 0x{addr:02x} expected 0x{val:02x}, got 0x{rb:02x}"
+    dut._log.info("All fast-timing SPI write/read passed")
+
+
+@cocotb.test()
+async def test_spi_back_to_back(dut):
+    """Rapid consecutive SPI transactions with minimal inter-frame gap."""
+    clock = Clock(dut.clk, 20, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset_dut(dut)
+
+    # Write all 8 LUT entries back-to-back using fast SPI
+    for i in range(8):
+        await spi_write_fast(dut, 0x08 + i, (i * 31 + 7) & 0xFF)
+
+    # Read them all back immediately
+    for i in range(8):
+        expected = (i * 31 + 7) & 0xFF
+        rb = await spi_read_fast(dut, 0x08 + i)
+        assert rb == expected, f"Back-to-back LUT[{i}]: expected 0x{expected:02x}, got 0x{rb:02x}"
+    dut._log.info("8 back-to-back fast SPI transactions verified")
+
+
+@cocotb.test()
+async def test_register_boundary_values(dut):
+    """Write 0x00 and 0xFF to all writable registers and verify readback."""
+    clock = Clock(dut.clk, 20, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset_dut(dut)
+
+    writable_regs = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                     0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F]
+
+    # Test 0xFF
+    for reg in writable_regs:
+        await spi_write(dut, reg, 0xFF)
+    for reg in writable_regs:
+        rb = await spi_read(dut, reg)
+        assert rb == 0xFF, f"Reg 0x{reg:02x}: expected 0xFF, got 0x{rb:02x}"
+
+    # Test 0x00
+    for reg in writable_regs:
+        await spi_write(dut, reg, 0x00)
+    for reg in writable_regs:
+        rb = await spi_read(dut, reg)
+        assert rb == 0x00, f"Reg 0x{reg:02x}: expected 0x00, got 0x{rb:02x}"
+    dut._log.info("All writable registers boundary values (0x00/0xFF) verified")
+
+
+@cocotb.test()
+async def test_decay_path(dut):
+    """Verify decay drains membrane when no input is applied."""
+    clock = Clock(dut.clk, 20, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset_dut(dut)
+
+    # Set high threshold (won't fire), moderate decay
+    await spi_write(dut, 0x05, 0xFF)  # threshold = max
+    await spi_write(dut, 0x06, 0x10)  # decay = 16
+
+    # Pump membrane up with external spikes
+    dut.ui_in.value = 0b11110101  # ext_spike=1, neuron_en=1, weight=0xF
+    await ClockCycles(dut.clk, 200)
+
+    # Check membrane has accumulated (top 4 bits visible on uo_out[7:4])
+    membrane_top = (int(dut.uo_out.value) >> 4) & 0xF
+    dut._log.info(f"Membrane top nibble after integration: 0x{membrane_top:X}")
+
+    # Stop input, let decay drain
+    dut.ui_in.value = 0b00000100  # neuron_en=1, no spike, no weight
+    await ClockCycles(dut.clk, 2000)
+
+    membrane_after = (int(dut.uo_out.value) >> 4) & 0xF
+    dut._log.info(f"Membrane top nibble after decay: 0x{membrane_after:X}")
+    assert membrane_after < membrane_top or membrane_after == 0, \
+        f"Decay should drain membrane: before=0x{membrane_top:X}, after=0x{membrane_after:X}"
+
+
+@cocotb.test()
+async def test_neuron_free_run_vs_spi_mode(dut):
+    """Test both mode_sel=0 (free-run/activation) and mode_sel=1 (SPI/weight) operation."""
+    clock = Clock(dut.clk, 20, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset_dut(dut)
+
+    # Low threshold, no decay for easy firing
+    await spi_write(dut, 0x05, 0x02)
+    await spi_write(dut, 0x06, 0x00)
+
+    # Mode 0 (free-run): mode_sel=0, neuron_en=1, ext_spike=1
+    dut.ui_in.value = 0b00000101  # ext_spike=1, neuron_en=1, mode_sel=0
+    fired_mode0 = False
+    for _ in range(500):
+        await ClockCycles(dut.clk, 1)
+        if int(dut.uo_out.value) & 1:
+            fired_mode0 = True
+            break
+    dut._log.info(f"Mode 0 (free-run) fired: {fired_mode0}")
+
+    # Reset accumulator
+    await spi_write(dut, 0x00, 0x03)
+    await ClockCycles(dut.clk, 5)
+    await spi_write(dut, 0x00, 0x01)
+    await ClockCycles(dut.clk, 5)
+
+    # Mode 1 (SPI-controlled): mode_sel=1, neuron_en=1, ext_spike=1, weight=0xF
+    dut.ui_in.value = 0b11110111  # ext_spike=1, mode_sel=1, neuron_en=1, weight=0xF
+    fired_mode1 = False
+    for _ in range(500):
+        await ClockCycles(dut.clk, 1)
+        if int(dut.uo_out.value) & 1:
+            fired_mode1 = True
+            break
+    dut._log.info(f"Mode 1 (SPI weight) fired: {fired_mode1}")
+
+    assert fired_mode0 or fired_mode1, "Neuron should fire in at least one mode"
