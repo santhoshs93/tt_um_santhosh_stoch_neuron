@@ -6,6 +6,7 @@
  * - 16-bit configurable-polynomial LFSR for random number generation
  * - 8-entry x 8-bit programmable sigmoid activation LUT
  * - 16-bit leaky integrator / accumulator
+ * - Refractory period: configurable post-spike dead-time (1-7 cycles)
  * - SPI-configurable parameters (polynomial, seed, threshold, decay, LUT)
  * - Designed as standalone IP for spintronic/memristive device interfaces
  */
@@ -59,7 +60,8 @@ module tt_um_santhosh_stoch_neuron (
     );
 
     // Configuration registers
-    reg [7:0] reg_ctrl;        // 0x00: [0]=enable, [1]=reset_accum, [2]=free_run
+    reg [7:0] reg_ctrl;        // 0x00: [0]=enable, [1]=reset_accum, [2]=free_run,
+                                //       [7:5]=refrac_period(0=off,1-7)
     reg [7:0] reg_poly_l;     // 0x01: LFSR polynomial [7:0]
     reg [7:0] reg_poly_h;     // 0x02: LFSR polynomial [15:8]
     reg [7:0] reg_seed_l;     // 0x03: LFSR seed [7:0]
@@ -70,6 +72,11 @@ module tt_um_santhosh_stoch_neuron (
 
     // LUT storage: 8 entries x 8 bits = 64 bits (implemented as register file)
     reg [7:0] lut_mem [0:7]; // 0x08-0x0F
+
+    // Refractory period state
+    reg [2:0] refrac_counter;
+    wire [2:0] refrac_period = reg_ctrl[7:5];
+    wire in_refractory = (refrac_counter != 3'd0);
 
     // Register write logic
     integer j;
@@ -119,6 +126,7 @@ module tt_um_santhosh_stoch_neuron (
             8'h05: rd_data = reg_threshold;
             8'h06: rd_data = reg_decay;
             8'h07: rd_data = reg_status;
+            8'h11: rd_data = {5'b0, refrac_counter}; // Refractory state (RO)
             default: begin
                 if (rd_addr >= 8'h08 && rd_addr <= 8'h0F)
                     rd_data = lut_mem[rd_addr[2:0]];
@@ -182,15 +190,22 @@ module tt_um_santhosh_stoch_neuron (
             membrane      <= 16'd0;
             spike_out     <= 1'b0;
             spike_latched <= 1'b0;
+            refrac_counter <= 3'd0;
         end else if (reg_ctrl[1]) begin
             membrane      <= 16'd0;
             spike_out     <= 1'b0;
             spike_latched <= 1'b0;
+            refrac_counter <= 3'd0;
         end else if (lfsr_en) begin
             spike_out <= 1'b0;
 
+            // Refractory period countdown
+            if (in_refractory) begin
+                refrac_counter <= refrac_counter - 3'd1;
+            end
+
             // Integrate: add input if stochastic comparison passes or external spike
-            if (stoch_fire || ext_spike) begin
+            if ((stoch_fire || ext_spike) && !in_refractory) begin
                 // Saturate at 16'hFFFF instead of wrapping
                 if (membrane > (16'hFFFF - {8'b0, input_current}))
                     membrane <= 16'hFFFF;
@@ -204,11 +219,12 @@ module tt_um_santhosh_stoch_neuron (
                     membrane <= 16'd0;
             end
 
-            // Fire check
-            if (membrane[15:8] >= reg_threshold) begin
-                spike_out     <= 1'b1;
-                spike_latched <= 1'b1;
-                membrane      <= 16'd0;  // Reset after spike
+            // Fire check (suppressed during refractory)
+            if (membrane[15:8] >= reg_threshold && !in_refractory) begin
+                spike_out      <= 1'b1;
+                spike_latched  <= 1'b1;
+                membrane       <= 16'd0;  // Reset after spike
+                refrac_counter <= refrac_period; // Start refractory
             end
         end
     end
@@ -216,7 +232,8 @@ module tt_um_santhosh_stoch_neuron (
     // ============================================================
     // Status register
     // ============================================================
-    assign reg_status = {4'b0, membrane[15], spike_latched, (membrane == 16'hFFFF), spike_out};
+    // Status register: [6]=in_refractory, [5:4]=0, [3]=membrane_msb, [2]=spike_latched, [1]=overflow, [0]=spike_out
+    assign reg_status = {1'b0, in_refractory, 2'b0, membrane[15], spike_latched, (membrane == 16'hFFFF), spike_out};
 
     // ============================================================
     // Output assignments

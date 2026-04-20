@@ -3,7 +3,7 @@ project:
   title:        "LFSR-Based Stochastic Neuron"
   author:       "Prof. Santhosh Sivasubramani, IIT Delhi"
   discord:      ""
-  description:  "Standalone stochastic neuron with configurable 16-bit LFSR, programmable sigmoid LUT, and SPI interface for neuromorphic computing"
+  description:  "Standalone stochastic neuron with configurable 16-bit LFSR, programmable sigmoid LUT, refractory period, and SPI interface for neuromorphic computing"
   language:     "Verilog"
   clock_hz:     50000000
 
